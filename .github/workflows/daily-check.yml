@@ -1,0 +1,165 @@
+# Ежедневная проверка VLESS-ключей и публикация configs/available (без расширения).
+# После проверки - speedtest по скорости; итог пишется в те же имена available и available(top100).
+
+name: Daily VLESS check
+
+on:
+  schedule:
+    # Каждые 4 часа (UTC). Сдвиг на 10 мин от начала часа уменьшает задержки GitHub
+    - cron: '10 0,4,8,12,16,20 * * *'
+  workflow_dispatch:
+    # Ручной запуск из вкладки Actions
+
+concurrency:
+  group: daily-vless-check
+  cancel-in-progress: true
+
+env:
+  MODE: merge
+  LINKS_FILE: links.txt
+  OUTPUT_FILE: available
+  OUTPUT_DIR: configs
+  OUTPUT_ADD_DATE: 'false'
+  MAX_WORKERS: 600
+  EXPORT_FORMAT: txt
+  ENABLE_CACHE: 'false'
+  TEST_URLS: http://www.google.com/generate_204,http://www.cloudflare.com/cdn-cgi/trace
+  TEST_URLS_HTTPS: https://www.gstatic.com/generate_204
+  REQUIRE_HTTPS: 'true'
+  STRONG_STYLE_TEST: 'true'
+  STRONG_STYLE_TIMEOUT: 12
+  STRONG_MAX_RESPONSE_TIME: 3
+  STRONG_DOUBLE_CHECK: 'true'
+  STRONG_ATTEMPTS: 3
+  REQUESTS_PER_URL: 2
+  MIN_SUCCESSFUL_REQUESTS: 2
+  MIN_SUCCESSFUL_URLS: 2
+  REQUEST_DELAY: 0.1
+  CONNECT_TIMEOUT: 6
+  CONNECT_TIMEOUT_SLOW: 15
+  USE_ADAPTIVE_TIMEOUT: 'false'
+  MAX_RETRIES: 1
+  MAX_RESPONSE_TIME: 6
+  MIN_RESPONSE_SIZE: 0
+  MAX_LATENCY_MS: 2000
+  VERIFY_HTTPS_SSL: 'false'
+  STABILITY_CHECKS: 2
+  STABILITY_CHECK_DELAY: 2.0
+  STRICT_MODE: 'true'
+  STRICT_MODE_REQUIRE_ALL: 'true'
+  TEST_POST_REQUESTS: 'false'
+
+  # Speedtest (после checker: результат в available и available(top100))
+  SPEED_TEST_ENABLED: 'true'
+  SPEED_TEST_TIMEOUT: 2
+  SPEED_TEST_MODE: full
+  SPEED_TEST_METRIC: latency
+  SPEED_TEST_OUTPUT: separate_file
+  SPEED_TEST_REQUESTS: 5
+  SPEED_TEST_URL: https://www.gstatic.com/generate_204
+  SPEED_TEST_WORKERS: 600
+  SPEED_TEST_DOWNLOAD_TIMEOUT: 30
+  SPEED_TEST_DOWNLOAD_URL_SMALL: https://speed.cloudflare.com/__down?bytes=250000
+  SPEED_TEST_DOWNLOAD_URL_MEDIUM: https://speed.cloudflare.com/__down?bytes=1000000
+  MIN_SPEED_THRESHOLD_MBPS: 1
+  SPEED_TEST_DEBUG: 'false'
+  XRAY_STARTUP_WAIT: 1.8
+  XRAY_STARTUP_POLL_INTERVAL: 0.2
+  BASE_PORT: 20000
+
+jobs:
+  check-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create links.txt from secret
+        run: |
+          if [ -z "$LINKS_FILE_CONTENT" ]; then
+            echo "::error::Secret LINKS_FILE_CONTENT is not set. Add it in Settings - Secrets and variables - Actions."
+            exit 1
+          fi
+          printf '%s' "$LINKS_FILE_CONTENT" > links.txt
+        env:
+          LINKS_FILE_CONTENT: ${{ secrets.LINKS_FILE_CONTENT }}
+
+      - name: Run vless_checker.py
+        run: python vless_checker.py
+
+      - name: Run speedtest on configs/available
+        if: env.SPEED_TEST_ENABLED == 'true'
+        run: python speedtest_checker.py configs/available
+        env:
+          MAX_WORKERS: ${{ env.MAX_WORKERS }}
+          BASE_PORT: ${{ env.BASE_PORT }}
+          XRAY_STARTUP_WAIT: ${{ env.XRAY_STARTUP_WAIT }}
+          XRAY_STARTUP_POLL_INTERVAL: ${{ env.XRAY_STARTUP_POLL_INTERVAL }}
+          VERIFY_HTTPS_SSL: ${{ env.VERIFY_HTTPS_SSL }}
+          SPEED_TEST_ENABLED: ${{ env.SPEED_TEST_ENABLED }}
+          SPEED_TEST_TIMEOUT: ${{ env.SPEED_TEST_TIMEOUT }}
+          SPEED_TEST_MODE: ${{ env.SPEED_TEST_MODE }}
+          SPEED_TEST_METRIC: ${{ env.SPEED_TEST_METRIC }}
+          SPEED_TEST_OUTPUT: ${{ env.SPEED_TEST_OUTPUT }}
+          SPEED_TEST_REQUESTS: ${{ env.SPEED_TEST_REQUESTS }}
+          SPEED_TEST_URL: ${{ env.SPEED_TEST_URL }}
+          SPEED_TEST_WORKERS: ${{ env.SPEED_TEST_WORKERS }}
+          SPEED_TEST_DOWNLOAD_TIMEOUT: ${{ env.SPEED_TEST_DOWNLOAD_TIMEOUT }}
+          SPEED_TEST_DOWNLOAD_URL_SMALL: ${{ env.SPEED_TEST_DOWNLOAD_URL_SMALL }}
+          SPEED_TEST_DOWNLOAD_URL_MEDIUM: ${{ env.SPEED_TEST_DOWNLOAD_URL_MEDIUM }}
+          MIN_SPEED_THRESHOLD_MBPS: ${{ env.MIN_SPEED_THRESHOLD_MBPS }}
+          SPEED_TEST_DEBUG: ${{ env.SPEED_TEST_DEBUG }}
+          OUTPUT_DIR: configs
+
+      - name: Replace available with speedtest result
+        if: env.SPEED_TEST_ENABLED == 'true'
+        run: |
+          if [ -f "configs/available_st" ] && [ -s "configs/available_st" ]; then
+            mv "configs/available_st" "configs/available"
+            if [ -f "configs/available_st(top100)" ]; then
+              mv "configs/available_st(top100)" "configs/available(top100)"
+            else
+              head -n 100 "configs/available" > "configs/available(top100)"
+            fi
+            echo "Replaced with speedtest result (by speed)"
+          else
+            echo "Speedtest produced no results, keeping checker output"
+          fi
+
+      - name: Commit and push configs/available, configs/available(top100) and configs/notworkers
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p configs
+          if [ -f "configs/available" ]; then git add configs/available; fi
+          if [ -f "configs/available(top100)" ]; then git add "configs/available(top100)"; fi
+          if [ -f "configs/notworkers" ]; then git add configs/notworkers; fi
+          if ! git diff --cached --quiet; then
+            NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            C=$(wc -l < "configs/available" 2>/dev/null || echo "0")
+            C100=$(wc -l < "configs/available(top100)" 2>/dev/null || echo "0")
+            OLD=$(cat configs/last-updated.json 2>/dev/null || echo '{}')
+            echo "$OLD" | jq -c --arg t "$NOW" --argjson c "$C" --argjson c100 "$C100" '.["configs/available"] = {updated: $t, count: $c} | .["configs/available(top100)"] = {updated: $t, count: $c100}' > configs/last-updated.json
+            git add configs/last-updated.json
+          fi
+          if ! git diff --cached --quiet; then
+            git commit -m "update configs/available, top100 and notworkers [check + speedtest, automated]"
+            git stash -u
+            git pull --rebase origin "${{ github.ref_name }}"
+            git stash pop || true
+            git push
+          else
+            echo "configs/available and top100 unchanged, skip push"
+          fi
