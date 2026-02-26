@@ -58,3 +58,9 @@ Each task MUST include (or be derivable by Architect):
 - No hallucinated APIs/files.
 - No "silent fixes": all deviations from plan must be logged (Architect -> NOTES/BLOCKERS, Coder -> IMPLEMENTATION LOG, Auditor -> AUDIT FINDINGS).
 - Prefer checklists and explicit commands over prose.
+
+## Orchestrator + Subagents
+- You will start work by selecting the `orchestrator` agent.
+- Orchestrator MUST call other agents using `runSubagent()` (profiles in `.github/agents/`).
+- Every `runSubagent()` prompt MUST begin with a short **GUARDRAILS** block that summarizes the relevant rules from this file.
+- Work is sequential (no competition, no parallel edits). Orchestrator is the only coordinator.
