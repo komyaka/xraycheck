@@ -112,7 +112,7 @@ if not VERIFY_HTTPS_SSL:
 
 # Геолокация
 CHECK_GEOLOCATION = _env_bool("CHECK_GEOLOCATION", False)
-GEOLOCATION_SERVICE = _env("GEOLOCATION_SERVICE", "http://httpbin.org/ip")
+GEOLOCATION_SERVICE = _env("GEOLOCATION_SERVICE", "http://ip-api.com/json")
 ALLOWED_COUNTRIES_STR = _env("ALLOWED_COUNTRIES", "")
 ALLOWED_COUNTRIES = [c.strip().upper() for c in ALLOWED_COUNTRIES_STR.split(",") if c.strip()] if ALLOWED_COUNTRIES_STR else []
 
