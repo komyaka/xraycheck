@@ -48,7 +48,6 @@ from .config import (
     XRAY_STARTUP_WAIT,
     _CLIENT_TEST_HTTPS,
 )
-import logging
 from .logger_config import should_debug as should_debug_func
 
 logger = logging.getLogger(__name__)
@@ -82,6 +81,18 @@ from .xray_manager import build_xray_config, kill_xray_process, run_xray
 logger = logging.getLogger(__name__)
 
 
+def _wait_for_socks_port(port: int, max_wait: float, poll_interval: float = 0.05) -> bool:
+    """Ждёт, пока SOCKS-порт станет доступен для подключения."""
+    deadline = time.perf_counter() + max_wait
+    while time.perf_counter() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                return True
+        except (OSError, socket.error):
+            time.sleep(poll_interval)
+    return False
+
+
 def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = None) -> tuple[str, bool, Optional[dict]]:
     """
     End-to-end проверка с расширенными возможностями.
@@ -90,7 +101,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
     """
     # debug параметр используется только для первого ключа и только если уровень логирования DEBUG
     should_debug_flag = should_debug_func(debug)
-    
+
     # Проверка кэша
     if cache is not None and ENABLE_CACHE:
         key_hash = get_key_hash(vless_line)
@@ -108,7 +119,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                 "cached": True
             }
             return (vless_line, cached_result, metrics)
-    
+
     metrics = {
         "response_times": [],
         "geolocation": None,
@@ -118,7 +129,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
         "successful_requests": 0,
         "cached": False
     }
-    
+
     parsed = parse_proxy_url(vless_line)
     if not parsed:
         if should_debug_flag:
@@ -144,11 +155,17 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
         if should_debug_flag:
             logger.debug("Нет свободного порта в пуле.")
         return (vless_line, False, metrics)
-    
+
     # Добавляем процесс в список активных для обработки сигналов
     proc = None
 
-    config = build_xray_config(parsed, port)
+    try:
+        config = build_xray_config(parsed, port)
+    except Exception as e:
+        return_port(port)
+        if should_debug_flag:
+            logger.debug(f"Ошибка построения конфига xray: {e}")
+        return (vless_line, False, metrics)
     fd, config_path = tempfile.mkstemp(suffix=".json", prefix="xray_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -178,15 +195,22 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                 logger.debug(f"xray завершился сразу. stderr:\n{err}")
             active_processes.remove((proc, port))
             return (vless_line, False, metrics)
-        
+
+        # Ждём, пока SOCKS-порт будет готов к приёму соединений
+        if not _wait_for_socks_port(port, max_wait=min(2.0, XRAY_STARTUP_WAIT)):
+            if should_debug_flag:
+                logger.debug(f"SOCKS порт {port} не стал доступен за отведённое время")
+            active_processes.remove((proc, port))
+            return (vless_line, False, metrics)
+
         proxies = {
             "http": f"socks5h://127.0.0.1:{port}",
             "https": f"socks5h://127.0.0.1:{port}",
         }
-        
+
         # Определяем таймаут
         timeout = CONNECT_TIMEOUT_SLOW if USE_ADAPTIVE_TIMEOUT else CONNECT_TIMEOUT
-        
+
         # Строгий режим: N запросов к gstatic/generate_204 подряд, без повторов; таймаут как в мобильном клиенте
         if STRONG_STYLE_TEST:
             test_url = _CLIENT_TEST_HTTPS
@@ -229,7 +253,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
             all_urls.extend([(url, "http") for url in TEST_URLS])
         if TEST_URLS_HTTPS:
             all_urls.extend([(url, "https") for url in TEST_URLS_HTTPS])
-        
+
         if not all_urls:
             if TEST_URL:
                 all_urls = [(TEST_URL, "http")]
@@ -238,39 +262,39 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                     logger.debug("Нет URL для проверки. Задайте TEST_URL или TEST_URLS.")
                 active_processes.remove((proc, port))
                 return (vless_line, False, metrics)
-        
+
         # Проверка стабильности: несколько проходов
         stability_results = []
         all_url_results = {}  # Сохраняем результаты всех проверок стабильности
         for stability_check in range(STABILITY_CHECKS):
             if stability_check > 0:
                 time.sleep(STABILITY_CHECK_DELAY)
-            
+
             url_results = {}
             successful_urls_count = 0
-            
+
             # Проверка каждого URL
             for url, url_type in all_urls:
                 url_successful = False
                 request_results = []
-                
+
                 # Множественные запросы к одному URL
                 for request_num in range(REQUESTS_PER_URL):
                     if request_num > 0:
                         time.sleep(REQUEST_DELAY)
-                    
+
                     # Повторные попытки с экспоненциальной задержкой
                     last_error = None
                     request_successful = False
-                    
+
                     for retry_attempt in range(MAX_RETRIES + 1):
                         if retry_attempt > 0:
                             delay = RETRY_DELAY_BASE * (RETRY_DELAY_MULTIPLIER ** (retry_attempt - 1))
                             time.sleep(delay)
-                        
+
                         response, elapsed_time, error = make_request(url, proxies, timeout)
                         metrics["total_requests"] += 1
-                        
+
                         if response and not error:
                             if check_response_valid(response, MIN_RESPONSE_SIZE, url):
                                 # Проверка времени ответа
@@ -278,7 +302,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                                     if should_debug_flag:
                                         logger.debug(f"Превышено время ответа: {elapsed_time:.2f}с > {MAX_RESPONSE_TIME}с")
                                     continue
-                                
+
                                 metrics["response_times"].append(elapsed_time)
                                 request_results.append(True)
                                 metrics["successful_requests"] += 1
@@ -294,23 +318,23 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                                     logger.debug(f"Ошибка соединения после {MAX_RETRIES + 1} попыток: {error}")
                                 else:
                                     logger.debug(f"Ошибка запроса: {error}")
-                        
+
                         # Если это connection error и есть еще попытки, продолжаем
                         if error and is_connection_error(error) and retry_attempt < MAX_RETRIES:
                             continue
                         elif error:
                             break
-                    
+
                     request_results.append(request_successful)
-                
+
                 # Проверяем, достаточно ли успешных запросов к этому URL
                 successful_requests = sum(request_results)
                 if successful_requests >= MIN_SUCCESSFUL_REQUESTS:
                     url_successful = True
                     successful_urls_count += 1
-                
+
                 url_results[url] = url_successful
-                
+
                 # Короткое замыкание: если уже достаточно успешных URL - не проверяем остальные
                 # (сохраняем качество: MIN_SUCCESSFUL_URLS по-прежнему требуется)
                 # В строгом режиме проверяем все URL
@@ -320,7 +344,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                     # Если нужен HTTPS - выходим только когда есть хотя бы один успешный HTTPS
                     if any(url_results.get(u, False) for u, t in all_urls if t == "https"):
                         break
-            
+
             # Проверка POST запросов (если включено)
             if TEST_POST_REQUESTS:
                 post_url = all_urls[0][0] if all_urls else TEST_URL
@@ -333,7 +357,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                     metrics["response_times"].append(post_elapsed)
                 elif should_debug_flag:
                     logger.debug(f"POST запрос не удался: {post_error}")
-            
+
             # Проверка геолокации
             if CHECK_GEOLOCATION:
                 geolocation = get_geolocation(proxies)
@@ -344,13 +368,13 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                             logger.debug(f"Геолокация не разрешена: {geolocation}")
                         active_processes.remove((proc, port))
                         return (vless_line, False, metrics)
-            
+
             # Сохраняем результаты для этого прохода проверки стабильности
             for url, success in url_results.items():
                 if url not in all_url_results:
                     all_url_results[url] = []
                 all_url_results[url].append(success)
-            
+
             # Проверка HTTPS для этой проверки стабильности
             https_check_passed = True
             if REQUIRE_HTTPS:
@@ -361,7 +385,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                         https_check_passed = False
                         if should_debug_flag:
                             logger.debug(f"Проверка стабильности {stability_check + 1}: нет успешных HTTPS URL")
-            
+
             # Проверяем, достаточно ли успешных URL
             # В строгом режиме требуем успешного прохождения всех URL
             if STRICT_MODE and STRICT_MODE_REQUIRE_ALL:
@@ -379,7 +403,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                     return (vless_line, False, metrics)
             else:
                 stability_results.append(successful_urls_count >= MIN_SUCCESSFUL_URLS and https_check_passed)
-        
+
         # Проверка стабильности: все проверки должны быть успешными
         if STABILITY_CHECKS > 1:
             all_stable = all(stability_results)
@@ -388,7 +412,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                     logger.debug(f"Нестабильное соединение: {sum(stability_results)}/{STABILITY_CHECKS} проверок успешно")
                 active_processes.remove((proc, port))
                 return (vless_line, False, metrics)
-        
+
         # Проверка среднего времени ответа
         if metrics["response_times"]:
             avg_time = sum(metrics["response_times"]) / len(metrics["response_times"])
@@ -398,7 +422,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                     logger.debug(f"Среднее время ответа слишком велико: {avg_time:.2f}с > {MIN_AVG_RESPONSE_TIME}с")
                 active_processes.remove((proc, port))
                 return (vless_line, False, metrics)
-        
+
         # Финальная проверка: достаточно ли успешных URL
         # Используем результаты последней проверки стабильности
         final_url_results = {}
@@ -416,11 +440,11 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
             # Fallback: если нет результатов проверки стабильности, используем пустые результаты
             final_url_results = {}
             final_successful_count = 0
-        
+
         metrics["successful_urls"] = final_successful_count
         metrics["failed_urls"] = len(all_urls) - final_successful_count
         is_available = final_successful_count >= MIN_SUCCESSFUL_URLS
-        
+
         # Проверка HTTPS, если требуется
         if REQUIRE_HTTPS:
             https_urls = [url for url, url_type in all_urls if url_type == "https"]
@@ -436,7 +460,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                                 logger.debug(f"  HTTPS {u} -> {final_url_results.get(u, False)}")
                         if not_checked:
                             logger.debug(f"  Не проверялись (короткое замыкание?): {not_checked}")
-                        from config import VERIFY_HTTPS_SSL
+                        from .config import VERIFY_HTTPS_SSL
                         if VERIFY_HTTPS_SSL:
                             logger.debug("  Совет: при ошибке SSL через прокси задайте VERIFY_HTTPS_SSL=false в .env")
                     is_available = False
@@ -444,7 +468,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                 if should_debug_flag:
                     logger.debug("REQUIRE_HTTPS: нет HTTPS URL для проверки (TEST_URLS_HTTPS пуст?)")
                 is_available = False
-        
+
         # В строгом режиме требуем успешного прохождения всех URL
         if STRICT_MODE and STRICT_MODE_REQUIRE_ALL:
             is_available = final_successful_count == len(all_urls)
@@ -457,7 +481,7 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                 else:
                     # Если REQUIRE_HTTPS=true, но нет HTTPS URL - это ошибка конфигурации
                     is_available = False
-        
+
         # Сохранение в кэш
         if cache is not None and ENABLE_CACHE:
             key_hash = get_key_hash(vless_line)
@@ -465,10 +489,10 @@ def check_key_e2e(vless_line: str, debug: bool = False, cache: Optional[dict] = 
                 'result': is_available,
                 'timestamp': time.time()
             }
-        
+
         active_processes.remove((proc, port))
         return (vless_line, is_available, metrics)
-        
+
     except FileNotFoundError:
         if should_debug_flag:
             import config

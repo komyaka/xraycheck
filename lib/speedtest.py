@@ -138,7 +138,13 @@ def speed_test_key(
         return None
 
     proc = None
-    config = build_xray_config(parsed, port)
+    try:
+        config = build_xray_config(parsed, port)
+    except Exception as e:
+        return_port(port)
+        if SPEED_TEST_DEBUG:
+            logger.info("speed_test_key: build_xray_config failed: %s", e)
+        return None
     fd, config_path = tempfile.mkstemp(suffix=".json", prefix="xray_st_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:

@@ -37,6 +37,10 @@ def _get_geolocation(proxies: dict, service_url: str) -> Optional[dict]:
         r = requests.get(service_url, proxies=proxies, timeout=CONNECT_TIMEOUT)
         if r.status_code == 200:
             data = r.json()
+            # ip-api.com format: {"countryCode": "RU", "query": "1.2.3.4", ...}
+            if "countryCode" in data:
+                return {"ip": data.get("query", ""), "country": data["countryCode"]}
+            # httpbin.org/ip fallback: {"origin": "1.2.3.4"}
             if "origin" in data:
                 ip = data["origin"].split(",")[0].strip()
                 return {"ip": ip}
@@ -52,7 +56,8 @@ def _check_geolocation_allowed(geolocation: Optional[dict], allowed_countries: l
         return True
     if not geolocation:
         return False
-    return "ip" in geolocation
+    country = geolocation.get("country", "")
+    return country.upper() in allowed_countries
 
 
 def make_request(
