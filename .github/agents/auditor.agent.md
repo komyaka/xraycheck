@@ -18,6 +18,18 @@ You MAY edit ONLY `STATUS.md` sections:
 
 You MUST NOT edit source code or tests.
 
+
+
+## Guardrails Intake (mandatory)
+You are invoked via `runSubagent()` by `orchestrator`.
+At the top of your invocation prompt you should receive a **GUARDRAILS** block derived from `.github/copilot-instructions.md`.
+Treat it as authoritative for:
+- write zones / allowed files
+- scope boundaries and acceptance criteria
+- required `STATUS.md` sections and outputs for this phase
+
+If GUARDRAILS are missing or contradictory, respond with `STATUS: REDO` and list exactly what is missing.
+
 ## Triple-Check Loop (reproducible)
 Level 1 — Static
 - Confirm build is warning-clean where feasible, types correct, no obvious leaks/UB patterns.

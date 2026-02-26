@@ -27,6 +27,16 @@ When you need Architect/Coder/Auditor, you MUST call:
 - `runSubagent({ agent: "<architect|coder|auditor>", input: "<task>", context: { phase: "...", status_path: "STATUS.md", in_scope: [...], out_of_scope: [...], constraints: "...", acceptance_criteria: [...] } })`
 
 ### Subagent return contract (strict)
+## Repo Instructions (only .github/copilot-instructions.md)
+This repository relies ONLY on `.github/copilot-instructions.md` for global rules.
+
+**Important:** subagents run in a fresh context and may not reliably inherit repo instructions.
+Therefore, every `runSubagent()` call MUST include a top-of-prompt **GUARDRAILS** block that summarizes the applicable rules from `.github/copilot-instructions.md`:
+- respect write zones / allowed files
+- do not expand scope or rewrite acceptance criteria (route back to PHASE 1 / Gate A)
+- keep work sequential (no parallel edits)
+- update `STATUS.md` as required by the current phase
+
 A subagent response MUST contain:
 1) **Summary** (5–10 bullets max)
 2) **STATUS.md updates** (exact sections to add/modify)

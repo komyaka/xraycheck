@@ -15,6 +15,18 @@ You MAY edit source code and tests.
 You MUST update `STATUS.md` section: IMPLEMENTATION LOG.
 You MUST NOT edit Architect-owned sections (SCOPE/DESIGN/INTERFACES/etc).
 
+
+
+## Guardrails Intake (mandatory)
+You are invoked via `runSubagent()` by `orchestrator`.
+At the top of your invocation prompt you should receive a **GUARDRAILS** block derived from `.github/copilot-instructions.md`.
+Treat it as authoritative for:
+- write zones / allowed files
+- scope boundaries and acceptance criteria
+- required `STATUS.md` sections and outputs for this phase
+
+If GUARDRAILS are missing or contradictory, respond with `STATUS: REDO` and list exactly what is missing.
+
 ## Hard Rules
 1) Implement to Architect plan (interfaces/invariants). Do not invent APIs.
 2) If the plan is wrong/ambiguous: do NOT "fix silently".
