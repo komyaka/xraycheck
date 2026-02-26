@@ -1,73 +1,134 @@
 # STATUS
 
 ## PROBLEM
-TBD
+Нужно убедиться, что код умеет получать списки адресов для проверки из разных источников (удалённая ссылка, локальный файл рядом с программой, ссылка на страницу/файл со ссылками на другие списки адресов, локальный файл со ссылками на такие страницы) и обновить README с примерами установки и запуска на Windows и Ubuntu.
 
 ## ACCEPTANCE CRITERIA
-- TBD
+- Прямой источник: при `MODE=single` указание HTTP(S) URL загружает список и проверяет ключи; сетевые ошибки выводятся и приводят к ненулевому коду выхода.
+- Локальный источник: при `MODE=single` указание относительного или абсолютного пути к файлу рядом со скриптом загружает список; отсутствие файла выдаёт понятное сообщение об ошибке.
+- Каскадные источники: удалённый URL, содержащий ссылки на списки, и/или локальный файл со ссылками на такие URL/файлы, обрабатываются рекурсивно с дедупликацией и ограничением глубины; итоговый набор ключей соответствует объединению уникальных ссылок.
+- README содержит актуальные примеры установки и запуска для Windows и Ubuntu, включая запуск с прямой ссылкой, локальным файлом и каскадным списком.
 
 ## CONSTRAINTS
-- TBD
+- Минимальные изменения кода и зависимостей; сохранить совместимость Windows/Ubuntu; не ломать существующие режимы работы.
 
 ## IN SCOPE
-- TBD
+- Логика загрузки списков/ссылок, обработка каскадных ссылок, README.
 
 ## OUT OF SCOPE
-- TBD
+- Новые протоколы, изменение логики проверки доступности, изменение интерактивных скриптов, не связанные с загрузкой списков.
 
 ## RUN/TEST COMMANDS
-TBD
+- Single, локальный файл (после подготовки `local_list.txt` с ключами):  
+  ```bash
+  python vless_checker.py local_list.txt
+  ```
+- Merge с каскадным файлом ссылок (`link_sources.txt` со ссылками/путями, `MODE=merge`):  
+  ```bash
+  MODE=merge LINKS_FILE=link_sources.txt python vless_checker.py
+  ```
+- Проверка обработки отсутствующего файла (ожидаемое понятное сообщение, ненулевой код):  
+  ```bash
+  MODE=merge LINKS_FILE=missing.txt python vless_checker.py
+  ```
 
 ---
 
 ## ORCHESTRATION
-TBD
+- Phase 0–2: нормализация задачи и план/дизайн от Архитектора зафиксированы.
+- Phase 3: Coder реализовал каскадный загрузчик URL/файлов, интегрировал single/merge, обновил README; выполнены локальные smoke-тесты загрузчика и codeql.
+- Next: провести аудит (Phase 4), при необходимости доработки; финализировать.
 
 ## SCOPE
-TBD
+- Верификация и план доработки загрузки списков адресов из: (a) прямых HTTP(S) ссылок, (b) локальных файлов рядом с программой, (c) каскадных источников, где удалённые ссылки и локальные файлы содержат ссылки на другие списки.
+- План обновления README с примерами установки/запуска для Windows и Ubuntu, отражающими варианты источников.
+- Минимальные изменения кода, без затрагивания логики проверки доступности и интерактивных скриптов, кроме необходимого для выбора источников.
 
 ## RISKS
-TBD
+- Циклы или глубокая рекурсия при каскадной загрузке ссылок (URL → файл → URL) без ограничений глубины/кэша.
+- Несогласованность путей между Windows/Ubuntu (относительные пути, `\` vs `/`, кодировки).
+- Большие или медленные удалённые списки могут замедлить запуск и вызвать таймауты/ошибки сети.
+- Недостаточная валидация ссылок/путей может пропустить некорректные или опасные значения.
+- Дубликаты ключей при каскадной загрузке увеличивают время проверки без пользы.
 
 ## DESIGN
-TBD
+- Централизовать загрузку источников в `lib/parsing.py`: единый резолвер (URL/файл) с проверкой валидности, чтением, декодированием подписок (использует `decode_subscription_content`).
+- Ввести рекурсивный сбор ссылок: `collect_sources(source, base_dir, depth, visited)` возвращает найденные дочерние источники и ключи; относительные пути вычисляются от каталога ссылки/файла или скрипта.
+- Ограничение глубины (фиксированное значение) и `visited` (нормализованные URL/абс. пути) для предотвращения циклов; логирование пропусков.
+- Дедупликация ключей через `normalize_proxy_link` перед добавлением; сохранение порядка первых встреч.
+- Ошибки загрузки/валидации: предупреждение + пропуск, продолжаем остальные источники.
+- README: добавить отдельные примеры для Windows/Ubuntu с прямой ссылкой, локальным файлом и каскадным списком.
 
 ## INTERFACES
-TBD
+- `lib.parsing.collect_sources(source: str, base_dir: Path, depth: int = 0, visited: set[str] | None = None) -> tuple[list[str], list[tuple[str, str]]]`: читает один источник, возвращает дочерние ссылки/пути и найденные ключи (с сохранением полной строки).
+- `lib.parsing.load_merged_keys(links_file: str) -> tuple[str, list[tuple[str, str]]]`: расширить на рекурсивные ссылки; принимает URL или путь, использует `collect_sources`, учитывает каталог файла для относительных путей.
+- `vless_checker.py` (режимы single/merge): использовать общий загрузчик для `list_url`/`LINKS_FILE`, сохранив логику `notworkers` и текущие аргументы CLI.
+- README: текстовые примеры команд (Windows cmd/PowerShell, Ubuntu bash).
 
 ## DATAFLOW
-TBD
+- Вход: аргумент CLI (single) или `LINKS_FILE` при `MODE=merge`.
+- Определение типа источника (URL/файл), нормализация пути (относительно каталога скрипта или файла списка).
+- Загрузка текста (HTTP(S) с валидацией, файл в UTF-8), декодирование подписок → парсинг ключей (`parse_proxy_lines`).
+- Извлечение дочерних источников (строки вида http(s):// или пути) → рекурсивный обход с глубиной и `visited`.
+- Аггрегация уникальных ключей, сохранение полной строки для вывода/метаданных.
+- Далее: существующая фильтрация `notworkers`, конфиг xray, проверка ключей, экспорт.
 
 ## EDGE CASES
-TBD
+- Циклические ссылки (файл A → B → A) — должны обрываться по `visited`/лимиту глубины без зависания.
+- Пустые файлы или файлы без ссылок/ключей → вывод понятного уведомления “нет ключей”.
+- Строки с произвольным текстом в каскадных файлах — игнорируются, не приводят к сбою.
+- Невалидные URL/пути или содержащие управляющие символы — отклоняются с сообщением.
+- Несуществующий локальный путь — понятная ошибка + ненулевой код выхода.
+- Смешанные разделители путей (`\`/`/`) нормализуются через `Path`.
+- Дубликаты ключей между источниками — удаляются, оставляя первое появление.
 
 ## PERFORMANCE NOTES
-TBD
+- Фиксированный лимит глубины каскада и набор `visited` сокращают количество загрузок.
+- Последовательная загрузка источников для предсказуемости; параллельность проверки ключей (MAX_WORKERS) не трогаем.
+- Ограничение размера/количества источников (при необходимости) для защиты от очень больших списков.
 
 ## TEST PLAN
-TBD
+- Single + локальный файл: создать `local_list.txt` с 2 валидными тестовыми ключами → `python vless_checker.py local_list.txt` → ожидается загрузка 2 ключей без ошибок.
+- Merge + каскад: `link_sources.txt` содержит URL и путь к локальному списку; локальный список содержит ещё один URL → `MODE=merge LINKS_FILE=link_sources.txt python vless_checker.py` → ожидается суммарный набор ключей без дубликатов, корректный прогресс.
+- Ошибка отсутствующего файла: `MODE=merge LINKS_FILE=absent.txt python vless_checker.py` → читаемое сообщение об отсутствии файла, код выхода ≠ 0.
+- Каскадный цикл: файл A с ссылкой на B, файл B на A → обработка завершается без зависания, логирует цикл/пропуск.
+- README проверка: убедиться, что добавлены отдельные блоки Windows/Ubuntu с примерами прямой ссылки, локального файла и каскада.
 
 ## NOTES / BLOCKERS
-TBD
+- Блокеров не выявлено; для автоматических проверок понадобится подготовить тестовые ключи/заглушки локальных файлов при реализации.
 
 ---
 
 ## IMPLEMENTATION LOG
-TBD
+- Summary:
+  - Added recursive source resolver with depth/visited and dedupe for HTTP/HTTPS and local files; integrated into single/merge flows.
+  - Improved error context for cascaded loads and kept notworkers filtering intact.
+  - Updated README with Ubuntu/Windows examples for direct URL, local file, and cascaded sources.
+- Commands:
+  - `pip install -r requirements.txt` (pass)
+  - `python - <<'PY' ...load_keys_with_cascade smoke test... PY` (pass; verifies cascade, cycle skip, depth cap)
+  - `codeql_checker` (pass, 0 alerts)
+- Edge cases handled:
+  - Cycle detection via visited/scheduled set and depth cap; duplicate keys deduped via normalize_proxy_link.
+  - Local path resolution relative to containing file; URL fetch errors surfaced with source context; missing files raise clear errors.
+- Known limitations / follow-ups:
+  - Cascade depth fixed at 3; larger hierarchies will be truncated with warnings.
 
 ---
 
 ## AUDIT FINDINGS
-TBD
+- Static: `python -m compileall lib vless_checker.py speedtest_checker.py` ✅ (без ошибок).
+- Logic: Проверено, что `load_keys_with_cascade`/`load_merged_keys` используют рекурсивный обход с `visited` и лимитом глубины 3, дедупликация ключей через `normalize_proxy_link`, ошибки загрузки в single/merge дают понятные сообщения и ненулевой код; README содержит примеры для Ubuntu/Windows (прямая ссылка, локальный файл, каскад).
+- Tests: Локальный каскадный smoke (временные файлы) через `load_keys_with_cascade` подтвердил дедупликацию и отсечение цикла (2 уникальных ключа, цикл залогирован).
 
 ## CHECKLIST
-- [ ] Acceptance criteria mapped and verified
-- [ ] Build command executed and recorded
-- [ ] Tests executed and recorded
-- [ ] Lint/format policy respected (if applicable)
-- [ ] No scope creep detected
-- [ ] Edge cases reviewed
-- [ ] Security sanity check (as applicable)
+- [x] Acceptance criteria mapped and verified
+- [x] Build command executed and recorded
+- [x] Tests executed and recorded
+- [x] Lint/format policy respected (if applicable)
+- [x] No scope creep detected
+- [x] Edge cases reviewed
+- [x] Security sanity check (as applicable)
 
 ## VERDICT
-TBD
+STATUS: VERIFIED

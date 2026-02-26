@@ -78,16 +78,58 @@ pip install -r requirements.txt
 
 ## Запуск
 
+### Ubuntu (bash)
+
 Список по умолчанию (режим single):
 
 ```bash
 python vless_checker.py
 ```
 
-Свой URL списка (режим single):
+Прямой URL списка (режим single):
 
 ```bash
 python vless_checker.py "https://example.com/my-vless-list.txt"
+```
+
+Локальный файл рядом со скриптом:
+
+```bash
+python vless_checker.py "./lists/local_list.txt"
+```
+
+Каскад ссылок (файл или URL содержит ссылки на другие списки):
+
+```bash
+MODE=merge LINKS_FILE=link_sources.txt python vless_checker.py
+```
+
+### Windows (cmd/PowerShell)
+
+Список по умолчанию (режим single):
+
+```cmd
+python vless_checker.py
+```
+
+Прямой URL списка (режим single):
+
+```cmd
+python vless_checker.py "https://example.com/my-vless-list.txt"
+```
+
+Локальный файл рядом со скриптом:
+
+```cmd
+python vless_checker.py ".\\lists\\local_list.txt"
+```
+
+Каскад ссылок (MODE=merge):
+
+```cmd
+set MODE=merge
+set LINKS_FILE=link_sources.txt
+python vless_checker.py
 ```
 
 Режим merge: положите ссылки в `links.txt`, в `.env` задайте `MODE=merge`:
@@ -299,4 +341,3 @@ chmod +x run_check.sh
 | `EXPORT_DIR` | Директория для экспорта |
 
 </details>
-

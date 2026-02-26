@@ -9,7 +9,8 @@ import json
 import os
 import requests
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs, unquote
+from pathlib import Path
+from urllib.parse import urljoin, urlparse, parse_qs, unquote
 
 from .config import OUTPUT_ADD_DATE, OUTPUT_DIR, OUTPUT_FILE
 from rich.console import Console
@@ -21,6 +22,9 @@ from rich.progress import (
 )
 
 console = Console()
+
+_MAX_CASCADE_DEPTH = 3
+_MAX_ERROR_MSG_LENGTH = 200
 
 
 def get_source_name(url_or_path: str) -> str:
@@ -618,63 +622,195 @@ def parse_proxy_url(proxy_url: str) -> dict | None:
     return None
 
 
+def _is_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
+
+
+def _normalize_source_identifier(source: str, base_dir: Path) -> str:
+    """Нормализует источник для visited: URL как есть, пути -> абсолютные пути."""
+    if _is_url(source):
+        return source.strip()
+    path = Path(source)
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    else:
+        path = path.resolve()
+    return str(path)
+
+
+def _looks_like_path(token: str) -> bool:
+    """
+    Грубая эвристика для выделения путей в каскадных файлах.
+    Обрабатывает относительные/абсолютные пути с / или \\, а также имена файлов вроде file.txt.
+    """
+    if "://" in token:
+        return False
+    if token.startswith(("#", "//")):
+        return False
+    if any(sep in token for sep in ("/", "\\")):
+        return True
+    return token.endswith((".txt", ".list", ".urls", ".lst"))
+
+
+def _log_cycle(source: str, reason: str = "cycle") -> None:
+    postfix = "из-за цикла" if reason == "cycle" else "повтор"
+    console.print(f"[yellow]Пропуск {postfix}:[/yellow] {source}")
+
+
+def _depth_exceeded(depth: int, source: str) -> bool:
+    if depth > _MAX_CASCADE_DEPTH:
+        console.print(f"[yellow]Превышена глубина каскада ({_MAX_CASCADE_DEPTH}) для: {source}[/yellow]")
+        return True
+    return False
+
+
+def _resolve_child_source(token: str, parent_source: str, base_dir: Path) -> str:
+    """Резолвит дочерний источник относительно родителя (URL или файл)."""
+    if _is_url(token):
+        return token
+    if _is_url(parent_source):
+        return urljoin(parent_source, token)
+    path = Path(token)
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    else:
+        path = path.resolve()
+    return str(path)
+
+
+def collect_sources(source: str, base_dir: Path, depth: int = 0, visited: set[str] | None = None) -> tuple[list[str], list[tuple[str, str]]]:
+    """
+    Читает один источник (URL или файл), возвращает (child_sources, keys).
+    Использует visited и ограничение глубины для защиты от циклов.
+    """
+    if visited is None:
+        visited = set()
+    normalized = _normalize_source_identifier(source, base_dir)
+
+    if normalized in visited:
+        _log_cycle(source, reason="cycle")
+        return [], []
+
+    if _depth_exceeded(depth, source):
+        return [], []
+
+    visited.add(normalized)
+
+    text: str
+    current_base_dir = base_dir
+
+    if _is_url(source):
+        try:
+            text = fetch_list(source)
+        except Exception as e:
+            raise ValueError(f"{source}: {e}") from e
+    else:
+        path = Path(source)
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
+        else:
+            path = path.resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Файл не найден: {path}")
+        current_base_dir = path.parent
+        with open(path, encoding="utf-8") as f:
+            text = decode_subscription_content(f.read())
+
+    keys = parse_proxy_lines(text)
+
+    child_sources: list[str] = []
+    seen_child: set[str] = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        for part in parts:
+            candidate = part.strip().strip(",;")
+            if not candidate:
+                continue
+            if any(candidate.startswith(p) for p in _SUBSCRIPTION_PROTOCOLS):
+                continue
+            if _is_url(candidate) or _looks_like_path(candidate):
+                resolved = _resolve_child_source(candidate, source, current_base_dir)
+                if resolved not in seen_child:
+                    seen_child.add(resolved)
+                    child_sources.append(resolved)
+
+    return child_sources, keys
+
+
+def _gather_keys(initial_source: str, base_dir: Path, stop_on_error: bool) -> list[tuple[str, str]]:
+    """Рекурсивный обход источников с дедупликацией ключей."""
+    queue: list[tuple[str, Path, int]] = [(initial_source, base_dir, 0)]
+    visited: set[str] = set()
+    scheduled: set[str] = {_normalize_source_identifier(initial_source, base_dir)}
+    seen_links: set[str] = set()
+    result: list[tuple[str, str]] = []
+
+    while queue:
+        source, current_base, depth = queue.pop(0)
+        scheduled.discard(_normalize_source_identifier(source, current_base))
+        try:
+            child_sources, keys = collect_sources(source, current_base, depth=depth, visited=visited)
+        except Exception as e:
+            if stop_on_error:
+                raise
+            error_msg = str(e)
+            if len(error_msg) > _MAX_ERROR_MSG_LENGTH:
+                error_msg = error_msg[:_MAX_ERROR_MSG_LENGTH - 3] + "..."
+            console.print(f"[yellow]Пропуск источника:[/yellow] {source} -> {error_msg}")
+            continue
+
+        for link, full in keys:
+            norm = normalize_proxy_link(link)
+            if norm and norm not in seen_links:
+                seen_links.add(norm)
+                result.append((link, full))
+
+        for child in child_sources:
+            if _is_url(child):
+                next_base = current_base
+            else:
+                next_base = Path(child).resolve().parent
+
+            normalized_child = _normalize_source_identifier(child, next_base)
+            next_depth = depth + 1
+            if normalized_child in visited:
+                _log_cycle(child, reason="cycle")
+                continue
+            if normalized_child in scheduled:
+                _log_cycle(child, reason="duplicate")
+                continue
+            if _depth_exceeded(next_depth, child):
+                continue
+
+            scheduled.add(normalized_child)
+            queue.append((child, next_base, next_depth))
+
+    return result
+
+
 def load_merged_keys(links_file: str) -> tuple[str, list[tuple[str, str]]]:
     """
     Режим merge: читает ссылки из links_file, загружает списки по каждой,
-    объединяет ключи (дедупликация по ссылке, первое вхождение). Возвращает
-    (имя_источника_для_вывода, список (vless_ссылка, полная_строка)).
+    объединяет ключи (дедупликация по ссылке, первое вхождение). Поддерживает
+    каскадные источники (файлы/URL, содержащие ссылки на другие списки).
+    Возвращает (имя_источника_для_вывода, список (proxy_ссылка, полная_строка)).
     """
-    urls = load_urls_from_file(links_file)
-    if not urls:
-        raise ValueError(f"В файле {links_file} нет ссылок")
-    seen_links: set[str] = set()
-    result: list[tuple[str, str]] = []
-    total_urls = len(urls)
-    
-    # Используем прогресс-бар для динамического обновления
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("({task.completed}/{task.total})"),
-        console=console
-    ) as progress:
-        task = progress.add_task(
-            f"[cyan]Парсинг и объединение ключей из {total_urls} ссылок ({links_file})...[/cyan]",
-            total=total_urls
-        )
-        
-        for idx, url in enumerate(urls, 1):
-            try:
-                text = fetch_list(url)
-                parsed = parse_proxy_lines(text)
-                new_count = 0
-                for link, full in parsed:
-                    if link not in seen_links:
-                        seen_links.add(link)
-                        result.append((link, full))
-                        new_count += 1
-                
-                # Обновляем прогресс-бар с информацией
-                progress.update(
-                    task,
-                    advance=1,
-                    description=f"[cyan]Парсинг ссылок...[/cyan] [{idx}/{total_urls}] {url} -> получено {len(parsed)} ключей, новых {new_count}, всего: {len(result)}"
-                )
-            except (requests.RequestException, requests.exceptions.InvalidURL, OSError, ValueError) as e:
-                # При ошибке загрузки или валидации URL помечаем URL и продолжаем
-                error_msg = str(e)
-                # Обрезаем длинные сообщения об ошибках
-                if len(error_msg) > 100:
-                    error_msg = error_msg[:97] + "..."
-                console.print(f"[yellow][{idx}/{total_urls}][/yellow] [red]Ошибка загрузки:[/red] {url} -> {error_msg}")
-                progress.update(
-                    task,
-                    advance=1,
-                    description=f"[cyan]Парсинг ссылок...[/cyan] [{idx}/{total_urls}] [red]Ошибка:[/red] {url} (пропущено)"
-                )
-                continue
-    
-    console.print(f"[bold]Итого уникальных ключей:[/bold] {len(result)}\n")
-    return ("merged", result)
+    base_dir = Path(links_file).resolve().parent if not _is_url(links_file) else Path.cwd()
+
+    keys = _gather_keys(links_file, base_dir, stop_on_error=False)
+    if not keys:
+        raise ValueError(f"В источнике {links_file} нет ключей или валидных ссылок")
+
+    return ("merged", keys)
+
+
+def load_keys_with_cascade(source: str) -> list[tuple[str, str]]:
+    """
+    Загружает ключи из источника (URL или локальный путь) с поддержкой каскада.
+    Для одиночного режима ошибки загрузки приводят к исключению.
+    """
+    base_dir = Path(source).resolve().parent if not _is_url(source) else Path.cwd()
+    return _gather_keys(source, base_dir, stop_on_error=True)

@@ -49,7 +49,7 @@ from lib.config import (
 from lib.config_display import print_current_config
 from lib.export import export_to_csv, export_to_html, export_to_json
 from lib.metrics import calculate_performance_metrics, print_statistics_table
-from lib.parsing import decode_subscription_content, get_output_path, load_keys_from_file, load_merged_keys, load_notworkers, load_notworkers_with_lines, normalize_proxy_link, parse_proxy_lines, parse_proxy_url, save_notworkers
+from lib.parsing import decode_subscription_content, get_output_path, load_keys_from_file, load_keys_with_cascade, load_merged_keys, load_notworkers, load_notworkers_with_lines, normalize_proxy_link, parse_proxy_lines, parse_proxy_url, save_notworkers
 from lib.signals import available_keys, interrupted, output_path_global
 from lib.xray_manager import build_xray_config, ensure_xray
 
@@ -67,15 +67,6 @@ def main():
     urls_arg = [a for a in sys.argv[1:] if not a.startswith("-")]
     print_config = "--print-config" in args or "-p" in args
 
-    def load_list(url_or_path: str) -> str:
-        """Загружает список по URL или читает из локального файла."""
-        if url_or_path.startswith("http://") or url_or_path.startswith("https://"):
-            r = requests.get(url_or_path, timeout=15)
-            r.raise_for_status()
-            return r.text
-        with open(url_or_path, encoding="utf-8") as f:
-            return f.read()
-
     # Определяем источник ключей и загружаем список в зависимости от режима
     if MODE == "notworkers":
         list_url = "notworkers"
@@ -85,27 +76,29 @@ def main():
             sys.exit(0)
         console.print(f"[cyan]Режим notworkers:[/cyan] проверка только ключей из {NOTWORKERS_FILE}")
     elif MODE == "merge":
-        list_url = "merged"
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        links_path = LINKS_FILE if os.path.isfile(LINKS_FILE) else os.path.join(script_dir, LINKS_FILE)
-        if not os.path.isfile(links_path):
-            console.print(f"[bold red]Ошибка:[/bold red] файл со ссылками не найден: {links_path}")
-            sys.exit(1)
+        list_url = LINKS_FILE
+        script_dir = Path(__file__).resolve().parent
+        links_path = LINKS_FILE
+        if not links_path.startswith(("http://", "https://")):
+            path_candidate = Path(links_path)
+            if not path_candidate.is_absolute():
+                path_candidate = (script_dir / path_candidate).resolve()
+            links_path = str(path_candidate)
+            if not Path(links_path).is_file():
+                console.print(f"[bold red]Ошибка:[/bold red] файл со ссылками не найден: {links_path}")
+                sys.exit(1)
         try:
             _, keys = load_merged_keys(links_path)
-        except (requests.RequestException, OSError) as e:
+        except (requests.RequestException, OSError, ValueError) as e:
             console.print(f"[bold red]Ошибка загрузки списков:[/bold red] {e}")
             sys.exit(1)
     else:
         list_url = urls_arg[0] if urls_arg else DEFAULT_LIST_URL
         try:
-            text = load_list(list_url)
-        except (requests.RequestException, OSError) as e:
+            keys = load_keys_with_cascade(list_url)
+        except (requests.RequestException, OSError, ValueError) as e:
             console.print(f"[bold red]Ошибка загрузки списка:[/bold red] {e}")
             sys.exit(1)
-        # Поддержка подписок в base64 (ссылки вроде nowmeow.pw/.../whitelist, gitverse.ru/.../whitelist.txt)
-        text = decode_subscription_content(text)
-        keys = parse_proxy_lines(text)
 
     # После парсинга и дедупликации: сверка с notworkers (по нормализованному ключу). Совпадающие не проверяем.
     # Если файла notworkers нет или он пуст - сверка пропускается.
